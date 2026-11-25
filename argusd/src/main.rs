@@ -3,10 +3,10 @@ use std::net::UdpSocket as StdUdpSocket;
 
 #[tokio::main]
 async fn main() {
-    let port: u16 = std::env::var("MESHD_PORT")
+    let port: u16 = std::env::var("ARGUSD_PORT")
       .unwrap_or_else(|_| "7946".to_string())
       .parse()
-      .expect("MESHD_PORT must be a valid port number");
+      .expect("ARGUSD_PORT must be a valid port number");
 
     let bind_addr = format!("0.0.0.0:{}", port);
     let std_socket = StdUdpSocket::bind(bind_addr).unwrap();
