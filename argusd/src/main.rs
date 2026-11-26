@@ -30,11 +30,9 @@ struct Node {
 }
 
 impl Node {
-    fn new(protocol_start: Instant) -> Self {
+    fn new(now: Instant, seed: Vec<Peer>) -> Self {
         let protocol_period = Duration::from_secs(1);  // TODO figure out a good protocol period
-        let peer = Peer{ address: "10.0.0.2".to_string() };  // TODO let it discover peers
-        let members = vec![peer];
-        Node{ protocol_period, protocol_start, protocol_sequence: 0, protocol_peer: None, protocol_ack: false, members }
+        Node{ protocol_period, protocol_start: now, protocol_sequence: 0, protocol_peer: None, protocol_ack: false, members: seed }
     }
 
     pub fn handle_time(&mut self, i: Instant) -> (Option<String>, Option<Message>) {
@@ -114,7 +112,7 @@ impl Node {
 
 fn main() {
     let t0 = Instant::now();
-    let mut node = Node::new(t0);
+    let mut node = Node::new(t0, vec![]);
 
 }
 
@@ -122,10 +120,15 @@ fn main() {
 mod tests {
     use super::*;
 
+    /// A node whose only seed is 10.0.0.2.
+    fn test_node(now: Instant) -> Node {
+        Node::new(now, vec![Peer { address: "10.0.0.2".to_string() }])
+    }
+
     #[test]
     fn no_ping_before_protocol_period() {
         let t0 = Instant::now();
-        let mut node = Node::new(t0);
+        let mut node = test_node(t0);
 
         let resp = node.handle_time(t0 + Duration::from_millis(999));
 
@@ -135,7 +138,7 @@ mod tests {
     #[test]
     fn pings_seed_after_protocol_period() {
         let t0 = Instant::now();
-        let mut node = Node::new(t0);
+        let mut node = test_node(t0);
 
         let resp = node.handle_time(t0 + Duration::from_millis(1001));
 
@@ -145,7 +148,7 @@ mod tests {
     #[test]
     fn ack_when_pinged() {
         let t0 = Instant::now();
-        let mut node = Node::new(t0);
+        let mut node = test_node(t0);
         let sender = Peer { address: "10.0.0.3".to_string() };
 
         let resp = node.handle_message(sender, Message::Ping(7));
@@ -156,7 +159,7 @@ mod tests {
     #[test]
     fn sole_member_removed_after_ping_not_acked() {
         let t0 = Instant::now();
-        let mut node = Node::new(t0);
+        let mut node = test_node(t0);
 
         // seed the ping
         let _ = node.handle_time(t0 + Duration::from_millis(1001));
@@ -171,7 +174,7 @@ mod tests {
     #[test]
     fn member_removed_after_previous_member_ack() {
         let t0 = Instant::now();
-        let mut node = Node::new(t0);
+        let mut node = test_node(t0);
         let sender = Peer { address: "10.0.0.3".to_string() };
 
         // seed the ping
@@ -192,7 +195,7 @@ mod tests {
     #[test]
     fn add_peer_on_ping() {
         let t0 = Instant::now();
-        let mut node = Node::new(t0);
+        let mut node = test_node(t0);
         let sender = Peer { address: "10.0.0.3".to_string() };
 
         let _ = node.handle_message(sender, Message::Ping(7));
@@ -203,7 +206,7 @@ mod tests {
     #[test]
     fn dont_duplicate_peer_on_ping() {
         let t0 = Instant::now();
-        let mut node = Node::new(t0);
+        let mut node = test_node(t0);
         let sender = Peer { address: "10.0.0.3".to_string() };
         let sender2 = sender.clone();
 
