@@ -1,5 +1,7 @@
 use std::time::{Duration, Instant};
 use rand::RngExt;
+use rand::{Rng, SeedableRng};
+use rand::rngs::StdRng;
 
 type ProtocolSequence = u64;
 
@@ -22,6 +24,7 @@ struct Node {
     protocol_peer: Option<usize>, // the peer that we targeted this period. index of `members`
     protocol_ack: bool, // tracks whether the peer has ack'd our ping this period
     members: Vec<Peer>,  // piggyback in equal amounts from each list of members
+    rng: StdRng,
 
 
     // members_failed_recently: Vec<Peer>,
@@ -30,9 +33,10 @@ struct Node {
 }
 
 impl Node {
-    fn new(now: Instant, seed: Vec<Peer>) -> Self {
+    fn new(now: Instant, seed: u64, peers: Vec<Peer>) -> Self {
         let protocol_period = Duration::from_secs(1);  // TODO figure out a good protocol period
-        Node{ protocol_period, protocol_start: now, protocol_sequence: 0, protocol_peer: None, protocol_ack: false, members: seed }
+        let rng = StdRng::seed_from_u64(seed);
+        Node{ protocol_period, protocol_start: now, protocol_sequence: 0, protocol_peer: None, protocol_ack: false, members: peers, rng }
     }
 
     pub fn handle_time(&mut self, i: Instant) -> (Option<String>, Option<Message>) {
@@ -86,8 +90,8 @@ impl Node {
         if self.members.len() == 0 {
             return (None, None);
         }
-        let idx = rand::rng().random_range(0..self.members.len());
-        self.protocol_peer = Some(idx);  // TODO seed RNG in Node
+        let idx = self.rng.random_range(0..self.members.len());
+        self.protocol_peer = Some(idx);
         let address = self.members[idx].address.clone();
         (Some(address), Some(Message::Ping(self.protocol_sequence)))
     }
@@ -112,8 +116,7 @@ impl Node {
 
 fn main() {
     let t0 = Instant::now();
-    let mut node = Node::new(t0, vec![]);
-
+    let mut node = Node::new(t0, 42, vec![]);
 }
 
 #[cfg(test)]
@@ -122,7 +125,7 @@ mod tests {
 
     /// A node whose only seed is 10.0.0.2.
     fn test_node(now: Instant) -> Node {
-        Node::new(now, vec![Peer { address: "10.0.0.2".to_string() }])
+        Node::new(now, 42, vec![Peer { address: "10.0.0.2".to_string() }])
     }
 
     #[test]
@@ -221,7 +224,7 @@ mod tests {
         // A knows about B but B should find out about A
         let t0 = Instant::now();
         let mut node_a = test_node(t0);
-        let mut node_b = Node::new(t0, Vec::new());
+        let mut node_b = Node::new(t0, 42, Vec::new());
 
         // let A ping B
         let a_resp = node_a.handle_time(t0 + Duration::from_millis(1001));
