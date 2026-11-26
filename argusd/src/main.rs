@@ -1,4 +1,5 @@
 use std::time::{Duration, Instant};
+use rand::RngExt;
 
 type ProtocolSequence = u64;
 
@@ -12,11 +13,15 @@ struct Peer {
     address: String
 }
 
+// TODO consider breaking fields into ProbeState struct
 struct Node {
     protocol_period: Duration,
     protocol_start: Instant,
     protocol_sequence: u64,
+    protocol_peer: Option<usize>, // the peer that we targeted this period. index of `members`
+    protocol_ack: bool, // tracks whether the peer has ack'd our ping this period
     members: Vec<Peer>,  // piggyback in equal amounts from each list of members
+
 
     // members_failed_recently: Vec<Peer>,
     // recent_membership_updates: Vec<u64>,
@@ -27,15 +32,20 @@ struct Node {
 impl Node {
     fn new(protocol_start: Instant) -> Self {
         let protocol_period = Duration::from_secs(1);  // TODO figure out a good protocol period
-        let peer = Peer{ address: "10.0.0.2".to_string() };
+        let peer = Peer{ address: "10.0.0.2".to_string() };  // TODO let it discover peers
         let members = vec![peer];
-        Node{ protocol_period, protocol_start, protocol_sequence: 0, members }
+        Node{ protocol_period, protocol_start, protocol_sequence: 0, protocol_peer: None, protocol_ack: false, members }
     }
 
     pub fn handle_time(&mut self, i: Instant) -> (Option<String>, Option<Message>) {
         let elapsed = i - self.protocol_start;
         if elapsed > self.protocol_period {
-            // TODO need to check that ping from last period was ack'd.
+            if let Some(idx) = self.protocol_peer {
+                if !self.protocol_ack {
+                    self.members.swap_remove(idx);
+                    self.protocol_peer = None;
+                }
+            }
 
             // Start new period
             self.protocol_start = i;
@@ -46,24 +56,21 @@ impl Node {
     }
 
     pub fn handle_message(&mut self, sender: Peer, message: Message) -> (Option<String>, Option<Message>) {
-        // TODO determine the message type and call message handler
         match message {
             Message::Ping(seq) => { 
                 return (Some(sender.address), Some(self.send_ack(seq)));
             }
             Message::Ack(seq) => {
-                // TODO was this ack for the ping in the current period?
+                // if the ack is for this period, update state. otherwise ignore
                 if seq == self.protocol_sequence {
-                    // the node is alive
-                } else {
-                    // this is a stale message... not sure what SWIM is supposed to do here, probably ignore?
+                    self.protocol_ack = true;
                 }
                 (None, None) 
             }
         }
     }
 
-    fn send_ping(&self) -> (Option<String>, Option<Message>) {
+    fn send_ping(&mut self) -> (Option<String>, Option<Message>) {
         // pick a random peer and ping it
         // wait for the response
         // if it doesnt come back before the timeout (less than timeout period), try to indirect probe
@@ -77,7 +84,10 @@ impl Node {
         if self.members.len() == 0 {
             return (None, None);
         }
-        (Some(self.members[0].address.clone()), Some(Message::Ping(self.protocol_sequence)))
+        let idx = rand::rng().random_range(0..self.members.len());
+        self.protocol_peer = Some(idx);  // TODO seed RNG in Node
+        let address = self.members[idx].address.clone();
+        (Some(address), Some(Message::Ping(self.protocol_sequence)))
     }
 
     fn indirect_probe(peer: Peer) {
@@ -99,17 +109,9 @@ impl Node {
 
 
 fn main() {
-    let now = Instant::now();
-    let mut node = Node::new(now);
+    let t0 = Instant::now();
+    let mut node = Node::new(t0);
 
-    let resp = node.handle_time(now + Duration::from_millis(999));
-    println!("after 0.999s: {:?}", resp);
-    let resp = node.handle_time(now + Duration::from_millis(1001));
-    println!("after 1.001s: {:?}", resp);
-
-    let sender = Peer { address: "10.0.0.3".to_string() };
-    let resp = node.handle_message(sender, Message::Ping(0));
-    println!("ping response: {:?}", resp);
 }
 
 #[cfg(test)]
@@ -145,5 +147,20 @@ mod tests {
         let resp = node.handle_message(sender, Message::Ping(7));
 
         assert_eq!(resp, (Some("10.0.0.3".to_string()), Some(Message::Ack(7))));
+    }
+
+    #[test]
+    fn sole_member_removed_after_ping_not_acked() {
+        let t0 = Instant::now();
+        let mut node = Node::new(t0);
+
+        // seed the ping
+        let _ = node.handle_time(t0 + Duration::from_millis(1001));
+        
+        // let the period expire without ack
+        let _ = node.handle_time(t0 + Duration::from_millis(2002));  // TODO 2001 causes this to fail, could be good to test that
+
+        assert_eq!(node.members.len(), 0);
+        assert_eq!(node.protocol_peer, None);
     }
 }
