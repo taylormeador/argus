@@ -9,7 +9,7 @@ enum Message {
     Ack(ProtocolSequence),
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 struct Peer {
     address: String
 }
@@ -214,5 +214,27 @@ mod tests {
         let _ = node.handle_message(sender2, Message::Ping(8));
         
         assert_eq!(node.members.len(), 2);
+    }
+
+    #[test]
+    fn two_nodes_find_each_other() {
+        // A knows about B but B should find out about A
+        let t0 = Instant::now();
+        let mut node_a = test_node(t0);
+        let mut node_b = Node::new(t0, Vec::new());
+
+        // let A ping B
+        let a_resp = node_a.handle_time(t0 + Duration::from_millis(1001));
+        
+        let sender = Peer{ address: "10.0.0.1".to_string()};
+        let message = match a_resp.1 {
+            Some(message) => { message }
+            None => panic!()
+        };
+        let _ = node_b.handle_message(sender, message);
+
+        // B should have A in the peer list
+        assert_eq!(node_b.members.len(), 1);
+        assert_eq!(node_b.members[0], Peer{ address: "10.0.0.1".to_string() });
     }
 }
