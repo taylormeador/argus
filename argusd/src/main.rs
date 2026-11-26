@@ -9,6 +9,7 @@ enum Message {
     Ack(ProtocolSequence),
 }
 
+#[derive(Clone, PartialEq)]
 struct Peer {
     address: String
 }
@@ -28,7 +29,6 @@ struct Node {
     // piggyback_count: Vec<u64>
 }
 
-// the driver will 
 impl Node {
     fn new(protocol_start: Instant) -> Self {
         let protocol_period = Duration::from_secs(1);  // TODO figure out a good protocol period
@@ -58,7 +58,10 @@ impl Node {
 
     pub fn handle_message(&mut self, sender: Peer, message: Message) -> (Option<String>, Option<Message>) {
         match message {
-            Message::Ping(seq) => { 
+            Message::Ping(seq) => {
+                if !self.members.contains(&sender) {
+                    self.members.push(sender.clone());
+                }
                 return (Some(sender.address), Some(self.send_ack(seq)));
             }
             Message::Ack(seq) => {
@@ -184,5 +187,29 @@ mod tests {
         let _ = node.handle_time(t0 + Duration::from_millis(3001));
 
         assert_eq!(node.members.len(), 0);
+    }
+
+    #[test]
+    fn add_peer_on_ping() {
+        let t0 = Instant::now();
+        let mut node = Node::new(t0);
+        let sender = Peer { address: "10.0.0.3".to_string() };
+
+        let _ = node.handle_message(sender, Message::Ping(7));
+        
+        assert_eq!(node.members.len(), 2);
+    }
+
+    #[test]
+    fn dont_duplicate_peer_on_ping() {
+        let t0 = Instant::now();
+        let mut node = Node::new(t0);
+        let sender = Peer { address: "10.0.0.3".to_string() };
+        let sender2 = sender.clone();
+
+        let _ = node.handle_message(sender, Message::Ping(7));
+        let _ = node.handle_message(sender2, Message::Ping(8));
+        
+        assert_eq!(node.members.len(), 2);
     }
 }
