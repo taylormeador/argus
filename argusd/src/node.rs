@@ -1,20 +1,22 @@
 use rand::RngExt;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
+use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
 type ProtocolSequence = u64;
 
-#[derive(Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub enum Message {
     Ping(ProtocolSequence),
     Ack(ProtocolSequence),
+    // PingReq(ProtocolSequence),
 }
 
 #[derive(Debug, PartialEq)]
 pub struct Payload {
-    pub peer: Peer,
+    pub peer: Peer, // who the message is going to
     pub message: Message,
 }
 
@@ -29,9 +31,9 @@ pub struct Node {
     protocol_period: Duration,
     protocol_start: Instant,
     protocol_sequence: u64,
-    protocol_peer: Option<usize>, // the peer that we targeted this period. index of `members`
-    protocol_ack: bool,           // tracks whether the peer has ack'd our ping this period
-    members: Vec<Peer>,           // piggyback in equal amounts from each list of members
+    pub protocol_peer: Option<usize>, // the peer that we targeted this period. index of `members`
+    protocol_ack: bool,               // tracks whether the peer has ack'd our ping this period
+    members: Vec<Peer>,               // piggyback in equal amounts from each list of members
     rng: StdRng,
     // members_failed_recently: Vec<Peer>,
     // recent_membership_updates: Vec<u64>,
