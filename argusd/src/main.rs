@@ -43,13 +43,14 @@ impl Node {
             if let Some(idx) = self.protocol_peer {
                 if !self.protocol_ack {
                     self.members.swap_remove(idx);
-                    self.protocol_peer = None;
                 }
             }
 
             // Start new period
-            self.protocol_start = i;
+            self.protocol_start = self.protocol_start + self.protocol_period;
             self.protocol_sequence = self.protocol_sequence + 1;
+            self.protocol_peer = None;
+            self.protocol_ack = false;
             return self.send_ping()
         }
         return (None, None);
@@ -158,9 +159,30 @@ mod tests {
         let _ = node.handle_time(t0 + Duration::from_millis(1001));
         
         // let the period expire without ack
-        let _ = node.handle_time(t0 + Duration::from_millis(2002));  // TODO 2001 causes this to fail, could be good to test that
+        let _ = node.handle_time(t0 + Duration::from_millis(2001));
 
         assert_eq!(node.members.len(), 0);
         assert_eq!(node.protocol_peer, None);
+    }
+
+    #[test]
+    fn member_removed_after_previous_member_ack() {
+        let t0 = Instant::now();
+        let mut node = Node::new(t0);
+        let sender = Peer { address: "10.0.0.3".to_string() };
+
+        // seed the ping
+        let _ = node.handle_time(t0 + Duration::from_millis(1001));
+
+        // ack the ping
+        let _ = node.handle_message(sender, Message::Ack(1));
+    
+        // seed a new ping
+        let _ = node.handle_time(t0 + Duration::from_millis(2001));
+
+        // let the period expire without ack, member is removed
+        let _ = node.handle_time(t0 + Duration::from_millis(3001));
+
+        assert_eq!(node.members.len(), 0);
     }
 }
