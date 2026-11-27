@@ -9,6 +9,11 @@ mod node;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
+    // Print tracing events to stderr, filtered by RUST_LOG (e.g. RUST_LOG=debug).
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+
     let args: Vec<String> = env::args().collect();
 
     let port: u16 = args

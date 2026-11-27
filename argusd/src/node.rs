@@ -1,19 +1,25 @@
 use rand::RngExt;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
+use rand::seq::IteratorRandom;
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
+use tracing::{debug, error, info, instrument, warn};
+
+const PROTOCOL_PERIOD: Duration = Duration::from_millis(1000);
+const PING_TIMEOUT: Duration = Duration::from_millis(75);
+const PROBING_SUBGROUP_SIZE: usize = 3;
 
 type ProtocolSequence = u64;
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
-struct PingReq {
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct PingReq {
     seq: ProtocolSequence,
     target: Peer,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub enum Message {
     Ping(ProtocolSequence),
     Ack(ProtocolSequence),
@@ -52,7 +58,7 @@ pub struct Node {
     protocol_period: Duration,
     protocol_start: Instant,
     ping_sequence: u64, // incremented each time a ping is sent, direct or on behalf of another peer
-    pub protocol_pings: Vec<ProtocolPing>, // the peers that we pinged this period
+    protocol_pings: Vec<ProtocolPing>, // the peers that we pinged this period
     members: Vec<Peer>, // piggyback in equal amounts from each list of members
     rng: StdRng,
     // members_failed_recently: Vec<Peer>,
@@ -68,10 +74,9 @@ pub struct Node {
 
 impl Node {
     pub fn new(now: Instant, seed: u64, peers: Vec<Peer>) -> Self {
-        let protocol_period = Duration::from_secs(1); // TODO figure out a good protocol period
         let rng = StdRng::seed_from_u64(seed);
         Node {
-            protocol_period,
+            protocol_period: PROTOCOL_PERIOD,
             protocol_start: now,
             ping_sequence: 0,
             protocol_pings: Vec::new(),
@@ -84,10 +89,11 @@ impl Node {
         &self.members
     }
 
-    pub fn handle_time(&mut self, i: Instant) -> Option<Outgoing> {
+    pub fn handle_time(&mut self, i: Instant) -> Vec<Outgoing> {
         let elapsed = i - self.protocol_start;
         // TODO invert this?
         if elapsed > self.protocol_period {
+            debug!("protocol_period ended");
             for ping in self.protocol_pings.clone() {
                 if ping.req.is_none() && !ping.ack {
                     // this is a ping we sent and never got an ack for
@@ -95,6 +101,7 @@ impl Node {
                     // TODO mark it as suspect instead
                     for i in 0..self.members.len() {
                         if self.members[i].address == ping.peer.address {
+                            info!("member suspected: {}", ping.peer.address);
                             self.members.swap_remove(i);
                             break;
                         }
@@ -103,7 +110,7 @@ impl Node {
             }
 
             // Start new protocol
-            self.protocol_start = self.protocol_start + self.protocol_period;
+            self.protocol_start = self.protocol_start + self.protocol_period; // TODO what if we are really slow/behind?
             self.ping_sequence = self.ping_sequence + 1;
             self.protocol_pings = Vec::new();
 
@@ -122,10 +129,43 @@ impl Node {
                     to: random_peer,
                     message: Message::Ping(self.ping_sequence),
                 };
-                return Some(payload);
+                return vec![payload];
             }
         }
-        return None;
+        // If elapsed is greater than ping timeout, we send PingReq to up to k members if we haven't already.
+        // self.protocol_pings.len() should be either `1` or `1 + min(PROBING_SUBGROUP_SIZE, self.members.len())`
+        // This is because the first item is always populated immediately when a new protocol starts.
+        // Later in the protocol, we would check here that it's `1` and then add k more pings.
+        if elapsed > PING_TIMEOUT && self.protocol_pings.len() == 1 && !self.protocol_pings[0].ack {
+            debug!("ping timed out for {:?}", self.protocol_pings[0].peer);
+            let k = std::cmp::min(PROBING_SUBGROUP_SIZE, self.members.len());
+            // TODO dont target the suspected node
+            let subgroup = self.members.iter().sample(&mut self.rng, k);
+            let mut pings = Vec::new();
+            for peer in subgroup {
+                self.ping_sequence = self.ping_sequence + 1;
+                let ping = ProtocolPing {
+                    peer: peer.clone(),
+                    ping_sequence: self.ping_sequence,
+                    req: None,
+                    req_ping_sequence: None,
+                    ack: false,
+                };
+                self.protocol_pings.push(ping);
+
+                let ping_req = PingReq {
+                    target: self.protocol_pings[0].peer,
+                    seq: self.protocol_pings[0].ping_sequence,
+                };
+                let payload = Outgoing {
+                    to: peer.clone(),
+                    message: Message::PingReq(ping_req),
+                };
+                pings.push(payload);
+            }
+            return pings;
+        }
+        return Vec::new();
     }
 
     pub fn handle_message(&mut self, incoming: Incoming) -> Option<Outgoing> {
@@ -196,6 +236,7 @@ impl Node {
     // return a random peer, if any exist
     fn get_random_peer(&mut self) -> Option<Peer> {
         if self.members.len() == 0 {
+            debug!("cannot randomly select peer, none exist");
             return None;
         }
         let idx = self.rng.random_range(0..self.members.len());
@@ -237,7 +278,7 @@ mod tests {
         let t0 = Instant::now();
         let mut node = test_node(t0);
 
-        let resp_exp = None;
+        let resp_exp = Vec::new();
         let resp = node.handle_time(t0 + Duration::from_millis(999));
 
         assert_eq!(resp, resp_exp);
@@ -248,10 +289,10 @@ mod tests {
         let t0 = Instant::now();
         let mut node = test_node(t0);
 
-        let resp_exp = Some(Outgoing {
+        let resp_exp = vec![Outgoing {
             to: NODE_B,
             message: Message::Ping(1),
-        });
+        }];
         let resp = node.handle_time(t0 + Duration::from_millis(1001));
 
         assert_eq!(resp, resp_exp);
@@ -357,18 +398,71 @@ mod tests {
 
         // let A ping B
         let payload = node_a.handle_time(t0 + Duration::from_millis(1001));
-        let a_resp = match payload {
-            Some(message) => message,
-            None => panic!(),
-        };
         let req = Incoming {
             from: NODE_A,
-            message: a_resp.message,
+            message: payload[0].message,
         };
 
         let _ = node_b.handle_message(req);
 
         // B should have A in the peer list
         assert_eq!(node_b.members, vec![NODE_A]);
+    }
+
+    #[test]
+    fn ping_req_begets_ping() {
+        let t0 = Instant::now();
+        let mut node_a = test_node(t0);
+
+        // B sends a PingReq to A targeting C
+        let ping_req = PingReq {
+            seq: 50,
+            target: NODE_C,
+        };
+        let req = Incoming {
+            from: NODE_B,
+            message: Message::PingReq(ping_req),
+        };
+
+        let resp_exp = Some(Outgoing {
+            to: NODE_C,
+            message: Message::Ping(1),
+        });
+
+        let resp = node_a.handle_message(req);
+
+        assert_eq!(resp, resp_exp)
+    }
+
+    #[test]
+    fn node_forwards_ack_for_ping_req() {
+        let t0 = Instant::now();
+        let mut node_a = test_node(t0);
+
+        // B sends a PingReq to A targeting C
+        let ping_req = PingReq {
+            seq: 50,
+            target: NODE_C,
+        };
+        let req = Incoming {
+            from: NODE_B,
+            message: Message::PingReq(ping_req),
+        };
+
+        // node A should remember this indirect ping
+        let _ = node_a.handle_message(req);
+
+        // C sends Ack to A with it's sequence, A should forward to B with B's sequence
+        let req = Incoming {
+            from: NODE_C,
+            message: Message::Ack(1),
+        };
+        let resp_exp = Some(Outgoing {
+            to: NODE_B,
+            message: Message::Ack(50),
+        });
+        let resp = node_a.handle_message(req);
+
+        assert_eq!(resp, resp_exp)
     }
 }

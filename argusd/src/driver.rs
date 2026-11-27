@@ -4,11 +4,13 @@ use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::{select, time};
 use tokio_util::sync::CancellationToken;
+use tracing::{debug, error, info, instrument, warn};
 
 // wire protocol
 // first byte is protocol version
 // the rest of the message is serialized by Postcard
 fn encode(message: &crate::node::Message) -> Result<Vec<u8>, Box<dyn Error>> {
+    debug!("encoding: {:?}", message);
     let mut bytes = vec![1u8]; // protocol version 1
     bytes = to_extend(&message, bytes)?;
     Ok(bytes)
@@ -24,6 +26,7 @@ fn decode(buf: &[u8]) -> Result<crate::node::Message, Box<dyn Error>> {
         return Err("unrecognized protocol version".into());
     }
     let message: crate::node::Message = from_bytes(&buf[1..])?;
+    debug!("decoded: {:?}", message);
     Ok(message)
 }
 
@@ -43,42 +46,42 @@ pub async fn run(
                 return Ok(node)
             }
             _ = interval.tick() => {
-                if let Some(resp) = node.handle_time(Instant::now()) {
+                let responses = node.handle_time(Instant::now());
+                for resp in responses {
                     let bytes = match encode(&resp.message) {
                         Ok(b) => b,
-                        Err(err) => {eprintln!("error encoding message: {}", err); continue},
+                        Err(err) => {error!("error encoding message: {}", err); continue},
                     };
-                    println!("sending to {}", resp.to.address);
+                    info!("sending {:?}", resp);
                     match socket.send_to(&bytes, resp.to.address).await {
                         Ok(_) => {}
-                        Err(err) => eprintln!("error sending response: {}", err)
+                        Err(err) => error!("error sending response: {}", err)
                     }
-                }
-
+                };
             }
             res = socket.recv_from(&mut buf) => {
                 // decode the request into Incoming
                 let (len, addr) = res?;
-                println!("Received {} bytes from {}: {:?}", len, addr, &buf[..len]);
-
                 let req = match decode(&buf[..len]) {
                     Ok(m) => m,
-                    Err(err) => {eprintln!("error decoding message: {}", err); continue},
+                    Err(err) => {error!("error decoding message: {}", err); continue},
                 };
                 let payload = crate::node::Incoming{
                     from: crate::node::Peer{address: addr},
                     message: req
                 };
+                info!("received {:?}", payload);
 
                 // deliver request to the Core and relay response
                 if let Some(resp) = node.handle_message(payload) {
                     let bytes = match encode(&resp.message) {
                         Ok(b) => b,
-                        Err(err) => {eprintln!("error encoding message: {}", err); continue},
+                        Err(err) => {error!("error encoding message: {}", err); continue},
                     };
+                    info!("sending {:?}", resp);
                     match socket.send_to(&bytes, resp.to.address).await {
                         Ok(_) => {}
-                        Err(err) => eprintln!("error sending response: {}", err)
+                        Err(err) => error!("error sending response: {}", err)
                     }
                 }
             }
