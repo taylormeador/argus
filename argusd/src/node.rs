@@ -91,14 +91,12 @@ impl Node {
 
     pub fn handle_time(&mut self, i: Instant) -> Vec<Outgoing> {
         let elapsed = i - self.protocol_start;
-        // TODO invert this?
+        // If the protocol has ended, handle unacked ping and start the new protocol
         if elapsed > self.protocol_period {
             debug!("protocol_period ended");
-            for ping in self.protocol_pings.clone() {
-                if ping.req.is_none() && !ping.ack {
-                    // this is a ping we sent and never got an ack for
-                    // find its index and remove it
-                    // TODO mark it as suspect instead
+            // The first ping is always our direct probe
+            if let Some(ping) = self.protocol_pings.first() {
+                if !ping.ack {
                     for i in 0..self.members.len() {
                         if self.members[i].address == ping.peer.address {
                             info!("member suspected: {}", ping.peer.address);
@@ -241,16 +239,6 @@ impl Node {
         }
         let idx = self.rng.random_range(0..self.members.len());
         Some(self.members[idx])
-    }
-
-    fn indirect_probe(peer: Peer) {
-        // select k members at random and send a ping-req request
-        // at the end of the period, see if we have received any acks (direct or indirect)
-        // if not, declare peer failed (later suspect) and hand off to Dissemination Component
-    }
-
-    fn send_ping_req(target: Peer) {
-        // send ping-req to random Peer asking to send ping to `target`
     }
 }
 
