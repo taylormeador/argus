@@ -55,6 +55,10 @@ impl Node {
         }
     }
 
+    pub fn members(&self) -> &[Peer] {
+        &self.members
+    }
+
     pub fn handle_time(&mut self, i: Instant) -> Option<Payload> {
         let elapsed = i - self.protocol_start;
         if elapsed > self.protocol_period {

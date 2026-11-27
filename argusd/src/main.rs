@@ -2,12 +2,13 @@ use std::env;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Instant;
 use tokio::net::UdpSocket;
+use tokio_util::sync::CancellationToken;
 
 mod driver;
 mod node;
 
 #[tokio::main]
-async fn main() -> std::io::Result<()> {
+async fn main() -> std::io::Result<node::Node> {
     let args: Vec<String> = env::args().collect();
 
     let port: u16 = args
@@ -30,5 +31,6 @@ async fn main() -> std::io::Result<()> {
 
     let addr = format!("0.0.0.0:{port}");
     let socket = UdpSocket::bind(addr).await?;
-    driver::run(node, socket).await
+    let token = CancellationToken::new();
+    driver::run(node, socket, token).await
 }

@@ -3,6 +3,7 @@ use std::error::Error;
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::{select, time};
+use tokio_util::sync::CancellationToken;
 
 // wire protocol
 // first byte is protocol version
@@ -26,7 +27,11 @@ fn decode(buf: &[u8]) -> Result<crate::node::Message, Box<dyn Error>> {
     Ok(message)
 }
 
-pub async fn run(mut node: crate::node::Node, socket: UdpSocket) -> std::io::Result<()> {
+pub async fn run(
+    mut node: crate::node::Node,
+    socket: UdpSocket,
+    token: CancellationToken,
+) -> std::io::Result<crate::node::Node> {
     const UDP_BUFFER_SIZE: usize = 1400;
     let mut buf = [0u8; UDP_BUFFER_SIZE];
 
@@ -34,6 +39,9 @@ pub async fn run(mut node: crate::node::Node, socket: UdpSocket) -> std::io::Res
     interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip); // TODO think through how protocol period handles this
     loop {
         select! {
+            _ = token.cancelled() => {
+                return Ok(node)
+            }
             _ = interval.tick() => {
                 if let Some(resp) = node.handle_time(Instant::now()) {
                     let bytes = match encode(&resp.message) {
@@ -75,5 +83,41 @@ pub async fn run(mut node: crate::node::Node, socket: UdpSocket) -> std::io::Res
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::node::{Node, Peer};
+
+    #[tokio::test]
+    async fn nodes_discover_ping_and_ack() {
+        // Port 0 lets the OS pick free ports, read them back to seed the nodes.
+        let socket_a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let socket_b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr_a = socket_a.local_addr().unwrap();
+        let addr_b = socket_b.local_addr().unwrap();
+
+        // A knows B; B knows nobody and should learn A from A's ping.
+        let t0 = Instant::now();
+        let node_a = Node::new(t0, 42, vec![Peer { address: addr_b }]);
+        let node_b = Node::new(t0, 42, Vec::new());
+
+        let token = CancellationToken::new();
+        let handle_a = tokio::spawn(run(node_a, socket_a, token.clone()));
+        let handle_b = tokio::spawn(run(node_b, socket_b, token.clone()));
+
+        // Long enough for A's second period to start, which is when an
+        // unacked B would have been removed.
+        time::sleep(Duration::from_millis(2500)).await;
+        token.cancel();
+
+        // Outer unwrap: the task didn't panic. Inner: run returned Ok.
+        let node_a = handle_a.await.unwrap().unwrap();
+        let node_b = handle_b.await.unwrap().unwrap();
+
+        assert_eq!(node_a.members(), &[Peer { address: addr_b }]);
+        assert_eq!(node_b.members(), &[Peer { address: addr_a }]);
     }
 }
