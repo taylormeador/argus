@@ -48,8 +48,8 @@ pub async fn run(
                         Ok(b) => b,
                         Err(err) => {eprintln!("error encoding message: {}", err); continue},
                     };
-                    println!("sending to {}", resp.peer.address);
-                    match socket.send_to(&bytes, resp.peer.address).await {
+                    println!("sending to {}", resp.to.address);
+                    match socket.send_to(&bytes, resp.to.address).await {
                         Ok(_) => {}
                         Err(err) => eprintln!("error sending response: {}", err)
                     }
@@ -57,7 +57,7 @@ pub async fn run(
 
             }
             res = socket.recv_from(&mut buf) => {
-                // decode the request into Payload
+                // decode the request into Incoming
                 let (len, addr) = res?;
                 println!("Received {} bytes from {}: {:?}", len, addr, &buf[..len]);
 
@@ -65,8 +65,8 @@ pub async fn run(
                     Ok(m) => m,
                     Err(err) => {eprintln!("error decoding message: {}", err); continue},
                 };
-                let payload = crate::node::Payload{
-                    peer: crate::node::Peer{address: addr},
+                let payload = crate::node::Incoming{
+                    from: crate::node::Peer{address: addr},
                     message: req
                 };
 
@@ -76,7 +76,7 @@ pub async fn run(
                         Ok(b) => b,
                         Err(err) => {eprintln!("error encoding message: {}", err); continue},
                     };
-                    match socket.send_to(&bytes, resp.peer.address).await {
+                    match socket.send_to(&bytes, resp.to.address).await {
                         Ok(_) => {}
                         Err(err) => eprintln!("error sending response: {}", err)
                     }

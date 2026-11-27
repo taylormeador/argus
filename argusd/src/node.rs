@@ -8,36 +8,62 @@ use std::time::{Duration, Instant};
 type ProtocolSequence = u64;
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
+struct PingReq {
+    seq: ProtocolSequence,
+    target: Peer,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub enum Message {
     Ping(ProtocolSequence),
     Ack(ProtocolSequence),
-    // PingReq(ProtocolSequence),
+    PingReq(PingReq),
 }
 
 #[derive(Debug, PartialEq)]
-pub struct Payload {
-    pub peer: Peer, // who the message is going to
+pub struct Outgoing {
+    pub to: Peer,
+    pub message: Message,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Incoming {
+    pub from: Peer,
     pub message: Message,
 }
 
 // TODO constructor?
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Copy, Clone, PartialEq, Debug)]
 pub struct Peer {
     pub address: SocketAddr,
+}
+
+#[derive(Copy, Clone, Debug)]
+struct ProtocolPing {
+    peer: Peer,
+    ping_sequence: u64,             // this node's ping_sequence
+    req: Option<Peer>,              // If no peer requested the ping, it was us
+    req_ping_sequence: Option<u64>, // the ping_sequence of the node who requested the ping
+    ack: bool,
 }
 
 // TODO consider breaking fields into ProbeState struct
 pub struct Node {
     protocol_period: Duration,
     protocol_start: Instant,
-    protocol_sequence: u64,
-    pub protocol_peer: Option<usize>, // the peer that we targeted this period. index of `members`
-    protocol_ack: bool,               // tracks whether the peer has ack'd our ping this period
-    members: Vec<Peer>,               // piggyback in equal amounts from each list of members
+    ping_sequence: u64, // incremented each time a ping is sent, direct or on behalf of another peer
+    pub protocol_pings: Vec<ProtocolPing>, // the peers that we pinged this period
+    members: Vec<Peer>, // piggyback in equal amounts from each list of members
     rng: StdRng,
     // members_failed_recently: Vec<Peer>,
     // recent_membership_updates: Vec<u64>,
     // piggyback_count: Vec<u64>
+
+    // TODO Each element is piggybacked at most lamda log n times. If the
+    // size of this buffer is larger than the maximum number of ele-
+    // ments that can be piggybacked on a single ping message (or
+    // ack), elements that have been gossiped fewer times are pre-
+    // ferred.
 }
 
 impl Node {
@@ -47,9 +73,8 @@ impl Node {
         Node {
             protocol_period,
             protocol_start: now,
-            protocol_sequence: 0,
-            protocol_peer: None,
-            protocol_ack: false,
+            ping_sequence: 0,
+            protocol_pings: Vec::new(),
             members: peers,
             rng,
         }
@@ -59,66 +84,122 @@ impl Node {
         &self.members
     }
 
-    pub fn handle_time(&mut self, i: Instant) -> Option<Payload> {
+    pub fn handle_time(&mut self, i: Instant) -> Option<Outgoing> {
         let elapsed = i - self.protocol_start;
+        // TODO invert this?
         if elapsed > self.protocol_period {
-            if let Some(idx) = self.protocol_peer {
-                if !self.protocol_ack {
-                    self.members.swap_remove(idx);
+            for ping in self.protocol_pings.clone() {
+                if ping.req.is_none() && !ping.ack {
+                    // this is a ping we sent and never got an ack for
+                    // find its index and remove it
+                    // TODO mark it as suspect instead
+                    for i in 0..self.members.len() {
+                        if self.members[i].address == ping.peer.address {
+                            self.members.swap_remove(i);
+                            break;
+                        }
+                    }
                 }
             }
 
-            // Start new period
+            // Start new protocol
             self.protocol_start = self.protocol_start + self.protocol_period;
-            self.protocol_sequence = self.protocol_sequence + 1;
-            self.protocol_peer = None;
-            self.protocol_ack = false;
-            return self.send_ping();
+            self.ping_sequence = self.ping_sequence + 1;
+            self.protocol_pings = Vec::new();
+
+            // Ping a random peer, if one exists
+            if let Some(random_peer) = self.get_random_peer() {
+                let random_ping = ProtocolPing {
+                    peer: random_peer,
+                    ping_sequence: self.ping_sequence,
+                    req: None,
+                    req_ping_sequence: None,
+                    ack: false,
+                };
+                self.protocol_pings.push(random_ping);
+
+                let payload = Outgoing {
+                    to: random_peer,
+                    message: Message::Ping(self.ping_sequence),
+                };
+                return Some(payload);
+            }
         }
         return None;
     }
 
-    pub fn handle_message(&mut self, payload: Payload) -> Option<Payload> {
-        match payload.message {
+    pub fn handle_message(&mut self, incoming: Incoming) -> Option<Outgoing> {
+        match incoming.message {
             Message::Ping(seq) => {
-                if !self.members.contains(&payload.peer) {
-                    self.members.push(payload.peer.clone());
+                // add peer as member if not already there
+                if !self.members.contains(&incoming.from) {
+                    self.members.push(incoming.from.clone());
                 }
-                return Some(Payload {
-                    peer: payload.peer,
-                    message: self.send_ack(seq),
+
+                return Some(Outgoing {
+                    to: incoming.from,
+                    message: Message::Ack(seq),
                 });
             }
             Message::Ack(seq) => {
-                // if the ack is for this period, update state. otherwise ignore
-                if seq == self.protocol_sequence {
-                    self.protocol_ack = true;
+                // The Ack could be from a node we probed either directly or indirectly.
+                // It could also be from a sequence other than the one it was created in.
+                // We need to find the ProtocolPing info associated with this sequence since we have a unique sequence for every ping we have sent.
+                // If it was a direct probe, we update our state.
+                // If it was indirect, we forward the Ack to the requestor.
+                for ping in &mut self.protocol_pings {
+                    if ping.ping_sequence == seq {
+                        // This is a valid Ack
+                        if let Some(requestor) = ping.req {
+                            // This ping was requested by a peer, forward it to them
+                            // ping.req_ping_sequence should never be None here since we always store the requestor and their sequence in the ping
+                            if let Some(req_ping_sequence) = ping.req_ping_sequence {
+                                let payload = Outgoing {
+                                    to: requestor,
+                                    message: Message::Ack(req_ping_sequence),
+                                };
+                                return Some(payload);
+                            }
+                        } else {
+                            // This ping was sent by us, update our internal state
+                            ping.ack = true;
+                        }
+                    }
                 }
                 None
+            }
+            // TODO we are never actually sending this
+            Message::PingReq(req) => {
+                // add peer as member if not already there
+                if !self.members.contains(&incoming.from) {
+                    self.members.push(incoming.from.clone());
+                }
+
+                self.ping_sequence = self.ping_sequence + 1;
+                let ping = ProtocolPing {
+                    peer: req.target,
+                    ping_sequence: self.ping_sequence,
+                    req: Some(incoming.from),
+                    req_ping_sequence: Some(req.seq),
+                    ack: false,
+                };
+                self.protocol_pings.push(ping);
+
+                Some(Outgoing {
+                    to: req.target,
+                    message: Message::Ping(self.ping_sequence),
+                })
             }
         }
     }
 
-    fn send_ping(&mut self) -> Option<Payload> {
-        // pick a random peer and ping it
-        // wait for the response
-        // if it doesnt come back before the timeout (less than timeout period), try to indirect probe
-        // if it does come back, compare with this node's unique sequence number in the protocol period
-
-        // Each element is piggybacked at most lamda log n times. If the
-        // size of this buffer is larger than the maximum number of ele-
-        // ments that can be piggybacked on a single ping message (or
-        // ack), elements that have been gossiped fewer times are pre-
-        // ferred.
+    // return a random peer, if any exist
+    fn get_random_peer(&mut self) -> Option<Peer> {
         if self.members.len() == 0 {
             return None;
         }
         let idx = self.rng.random_range(0..self.members.len());
-        self.protocol_peer = Some(idx);
-        Some(Payload {
-            peer: self.members[idx].clone(),
-            message: Message::Ping(self.protocol_sequence),
-        })
+        Some(self.members[idx])
     }
 
     fn indirect_probe(peer: Peer) {
@@ -129,12 +210,6 @@ impl Node {
 
     fn send_ping_req(target: Peer) {
         // send ping-req to random Peer asking to send ping to `target`
-    }
-
-    fn send_ack(&self, seq: ProtocolSequence) -> Message {
-        // respond to ping() messages we receive
-        // include piggyback
-        Message::Ack(seq)
     }
 }
 
@@ -173,8 +248,8 @@ mod tests {
         let t0 = Instant::now();
         let mut node = test_node(t0);
 
-        let resp_exp = Some(Payload {
-            peer: NODE_B,
+        let resp_exp = Some(Outgoing {
+            to: NODE_B,
             message: Message::Ping(1),
         });
         let resp = node.handle_time(t0 + Duration::from_millis(1001));
@@ -187,12 +262,12 @@ mod tests {
         let t0 = Instant::now();
         let mut node = test_node(t0);
 
-        let req = Payload {
-            peer: NODE_B,
+        let req = Incoming {
+            from: NODE_B,
             message: Message::Ping(7),
         };
-        let payload_exp = Payload {
-            peer: NODE_B,
+        let payload_exp = Outgoing {
+            to: NODE_B,
             message: Message::Ack(7),
         };
         let resp = node.handle_message(req);
@@ -212,7 +287,7 @@ mod tests {
         let _ = node.handle_time(t0 + Duration::from_millis(2001));
 
         assert_eq!(node.members.len(), 0);
-        assert_eq!(node.protocol_peer, None);
+        assert!(node.protocol_pings.is_empty());
     }
 
     #[test]
@@ -224,8 +299,8 @@ mod tests {
         let _ = node.handle_time(t0 + Duration::from_millis(1001));
 
         // B acks the ping
-        let payload = Payload {
-            peer: NODE_B,
+        let payload = Incoming {
+            from: NODE_B,
             message: Message::Ack(1),
         };
         let _ = node.handle_message(payload);
@@ -244,8 +319,8 @@ mod tests {
         let t0 = Instant::now();
         let mut node = test_node(t0);
 
-        let payload = Payload {
-            peer: NODE_C,
+        let payload = Incoming {
+            from: NODE_C,
             message: Message::Ping(7),
         };
         let _ = node.handle_message(payload);
@@ -258,14 +333,14 @@ mod tests {
         let t0 = Instant::now();
         let mut node = test_node(t0);
 
-        let payload = Payload {
-            peer: NODE_C,
+        let payload = Incoming {
+            from: NODE_C,
             message: Message::Ping(7),
         };
         let _ = node.handle_message(payload);
 
-        let payload = Payload {
-            peer: NODE_C,
+        let payload = Incoming {
+            from: NODE_C,
             message: Message::Ping(8),
         };
         let _ = node.handle_message(payload);
@@ -286,8 +361,8 @@ mod tests {
             Some(message) => message,
             None => panic!(),
         };
-        let req = Payload {
-            peer: NODE_A,
+        let req = Incoming {
+            from: NODE_A,
             message: a_resp.message,
         };
 

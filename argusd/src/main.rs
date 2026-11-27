@@ -8,7 +8,7 @@ mod driver;
 mod node;
 
 #[tokio::main]
-async fn main() -> std::io::Result<node::Node> {
+async fn main() -> std::io::Result<()> {
     let args: Vec<String> = env::args().collect();
 
     let port: u16 = args
@@ -32,5 +32,6 @@ async fn main() -> std::io::Result<node::Node> {
     let addr = format!("0.0.0.0:{port}");
     let socket = UdpSocket::bind(addr).await?;
     let token = CancellationToken::new();
-    driver::run(node, socket, token).await
+    let _ = driver::run(node, socket, token).await?;
+    Ok(())
 }
